@@ -1,4 +1,3 @@
-# Author(s): Seungmoon Song <seungmoon.song@gmail.com>
 """
 adapted from:
 - Song and Geyer. "A neural circuitry that emphasizes
@@ -35,9 +34,10 @@ class LocoCtrl(object):
     # S_KNEE = 1 # 1: extension > 0; -1: flexion > 0
     # ANKLE0 = 0*np.pi/180 # ankle angle when standing straight
     # S_ANKLE = 1 # 1: plantar flexion > 0; -1: dorsiflexion > 0
-
+    
     # muscle names
     m_keys = ['HAB', 'HAD', 'HFL', 'GLU', 'HAM', 'RF', 'VAS', 'BFSH', 'GAS', 'SOL', 'TA']
+    
     # body sensor data
     s_b_keys = ['theta', 'd_pos', 'dtheta']
         # theta[0]: around local x axis (pointing anterior)
@@ -46,6 +46,7 @@ class LocoCtrl(object):
         # pos[0]: local x
         # pos[1]: local y
         # pos[2]: local z
+        
     # leg sensor data
     # anglular values follow the Song2015 convention
     s_l_keys = [
@@ -54,6 +55,7 @@ class LocoCtrl(object):
         'phi_hip', 'phi_knee', 'phi_ankle', 'dphi_knee'
         'F_RF', 'F_VAS', 'F_GAS', 'F_SOL',
         ]
+    
     # control states
     cs_keys = [
         'ph_st', # leg in stance
@@ -65,6 +67,7 @@ class LocoCtrl(object):
         'ph_sw_stop_l', # leg in swing ^ stop leg
         'ph_sw_hold_l' # leg in swing ^ hold leg
         ]
+    
     # control parameters
     cp_keys = [
         'theta_tgt', 'c0', 'cv', 'alpha_delta',
@@ -83,7 +86,7 @@ class LocoCtrl(object):
         'HAB_3_PG', 'HAB_3_DG', 'HAB_6_PG',
         'HAD_3_PG', 'HAD_3_DG', 'HAD_6_PG'
         ]
-
+    
     par_space = (
         [0.0, -1.0, 0.0, 0.0, \
         -2.0, -90/15, -1.0, 0.0, \
@@ -115,15 +118,16 @@ class LocoCtrl(object):
         2.0, 3.0, \
         3.0, 3.0, 3.0, \
         3.0, 3.0, 3.0])
-
+    
     m_map = dict(zip(m_keys, range(len(m_keys))))
     s_b_map = dict(zip(s_b_keys, range(len(s_b_keys))))
     s_l_map = dict(zip(s_l_keys, range(len(s_l_keys))))
     cs_map = dict(zip(cs_keys, range(len(cs_keys))))
     cp_map = dict(zip(cp_keys, range(len(cp_keys))))
-
-# -----------------------------------------------------------------------------------------------------------------
-    def __init__(self, TIMESTEP, control_mode=1, control_dimension=3, params=np.ones(len(cp_keys))):
+    
+    #------------------------------------------------------------------------------------------------
+    # to make an object
+    def __init__(self, TIMESTEP, control_mode=1, control_dimension=3, params=np.ones(len(cp_keys)), W_CGP= 0):
         if self.DEBUG:
             print("===========================================")
             print("locomotion controller created in DEBUG mode")
@@ -133,7 +137,10 @@ class LocoCtrl(object):
         # 0: spinal control (no brain control)
         # 1: full control
         self.control_dimension = control_dimension # 2D or 3D
-
+        
+        #Shakiba
+        self.W_CGP= W_CGP
+        #
         if self.control_mode == 0:
             self.brain_control_on = 0
         elif self.control_mode == 1:
@@ -143,6 +150,12 @@ class LocoCtrl(object):
         self.in_contact = {}
         self.brain_command = {}
         self.stim = {}
+        
+        #Shakiba
+        self.stim0_ph = {}
+        self.Phase = {}
+        self.TIMESTEP = TIMESTEP
+        #
 
         self.n_par = len(LocoCtrl.cp_keys)
         if self.control_dimension == 2:
@@ -151,8 +164,8 @@ class LocoCtrl(object):
         self.cp = {}
 
         self.reset(params)
-
-# -----------------------------------------------------------------------------------------------------------------
+    #------------------------------------------------------------------------------------------------
+    # reset specifies dicts and spinal_control_phase and stim
     def reset(self, params=None):
         self.in_contact['r_leg'] = 1
         self.in_contact['l_leg'] = 0
@@ -186,8 +199,8 @@ class LocoCtrl(object):
 
         if params is not None:
             self.set_control_params(params)
-
-# -----------------------------------------------------------------------------------------------------------------
+    #------------------------------------------------------------------------------------------------
+    # based on n_par specifies the control parameters
     def set_control_params(self, params):
         if len(params) == self.n_par:
             self.set_control_params_RL('r_leg', params)
@@ -197,8 +210,8 @@ class LocoCtrl(object):
             self.set_control_params_RL('l_leg', params[self.n_par:])
         else:
             raise Exception('error in the number of params!!')
-
-# -----------------------------------------------------------------------------------------------------------------
+    # -----------------------------------------------------------------------------------------------------------------
+    # specifies the control parameters
     def set_control_params_RL(self, s_leg, params):
         cp = {}
         cp_map = self.cp_map
@@ -269,12 +282,12 @@ class LocoCtrl(object):
         self.cp[s_leg] = cp
 
 # -----------------------------------------------------------------------------------------------------------------
-    def update(self, sensor_data):
+    def update(self, sensor_data, Phase):
         self.sensor_data = sensor_data
-
+        
         if self.brain_control_on:
             # update self.brain_command
-            self._brain_control(sensor_data)
+            self._brain_control(sensor_data, Phase)   # Shakiba: added Phase as an input for brain_control
         
         # updates self.stim
         self._spinal_control(sensor_data)
@@ -291,15 +304,56 @@ class LocoCtrl(object):
             self.stim['l_leg']['TA']
             ])
         # todo: self._flaten(self.stim)
-        return stim
+        
+        # Shakiba
+        Phase = self.Phase
+        #
+        
+        return stim, Phase    # Shakiba: added Phase as both the input and output of update
 
 # -----------------------------------------------------------------------------------------------------------------
-    def _brain_control(self, sensor_data=0):
+    # brain_control uses sensory data(without delay) to specify the brain_commands
+    
+    def _brain_control(self, sensor_data=0, Phase = 0):
         s_b = sensor_data['body']
         cp = self.cp
-
+        
         self.brain_command['r_leg'] = {}
         self.brain_command['l_leg'] = {}
+        
+        #Shakiba
+        self.Phase['r_leg'] = Phase['r_leg']
+        self.Phase['l_leg'] = Phase['l_leg']
+
+        self.stim0_ph['r_leg'] = {}
+        self.stim0_ph['l_leg'] = {}
+        
+        omega = 1*(2*np.pi);              # the walking frequency is roughly 1
+        
+        muscle = ['HFL', 'GLU', 'HAM', 'RF', 'VAS', 'BFSH', 'GAS', 'SOL', 'TA']
+        	
+        	# Aoi [2010] Phase resetting parameters
+        phi_Off = 3.55;
+        phi_Con = 0.31;
+
+            # Aoi [2010] CPG parameters
+        phi  = np.array([0.9708-1, 0.2308, 0.4027, 0.5539, 0.8515])*omega
+        dphi = np.array([0.1114, 0.1432, 0.1432, 0.1703, 0.1528])*omega
+            
+        w = {}
+        #w['HFL'] = np.array([0.00, 0.00, 1.04, 0.00, 0.00])
+        #w['GLU'] = np.array([0.00, 0.00, 0.00, 0.00, 0.61])
+        #w['HAM'] = np.array([0.00, 0.00, 0.00, 0.00, 0.20])
+        #w['RF']  = np.array([0.00, 0.00, 0.20, 0.00, 0.00])
+        #w['VAS'] = np.array([0.42, 0.00, 0.00, 0.17, 0.00])
+        #w['BFSH']= np.array([0.00, 0.00, 1.09, 0.00, 0.20])
+        #w['GAS'] = np.array([0.00, 0.87, 0.00, 0.00, 0.00])
+        #w['SOL'] = np.array([0.00, 1.26, 0.00, 0.00, 0.00])
+        #w['TA']  = np.array([0.56, 0.00, 0.00, 0.21, 0.00])
+        
+        w = self.W_CGP
+        #
+        
         for s_leg in ['r_leg', 'l_leg']:
             if self.control_dimension == 3:
                 self.brain_command[s_leg]['theta_tgt_f'] = cp[s_leg]['theta_tgt_f']
@@ -320,7 +374,7 @@ class LocoCtrl(object):
             # alpha = hip - 0.5*knee
             self.brain_command[s_leg]['hip_tgt'] = \
                 self.brain_command[s_leg]['alpha_tgt'] + 0.5*self.brain_command[s_leg]['knee_tgt']
-
+            
         # select which leg to swing
         self.brain_command['r_leg']['swing_init'] = 0
         self.brain_command['l_leg']['swing_init'] = 0
@@ -331,14 +385,43 @@ class LocoCtrl(object):
                 self.brain_command['r_leg']['swing_init'] = 1
             else:
                 self.brain_command['l_leg']['swing_init'] = 1
-    
+        
+        #Shakiba
+        for s_leg in ['r_leg', 'l_leg']:
+            ph0i = Phase['r_leg']  if s_leg is 'r_leg' else Phase['l_leg']    # ipsilateral leg initial phase
+            ph0c = Phase['l_leg']  if s_leg is 'r_leg' else Phase['r_leg']    # contralateral leg initial phase
+            
+                # Aoi [2010] Oscillator
+            dPhase = (omega-1.7*np.sin(ph0i-ph0c-np.pi))    
+           
+            self.Phase[s_leg] = (dPhase*self.TIMESTEP + ph0i)%(2*np.pi)
+            
+                # Aoi [2010] Phase Resetting
+            if self.brain_command[s_leg]['swing_init']:
+                self.Phase[s_leg] = phi_Off
+                
+            if not self.in_contact[s_leg] and sensor_data[s_leg]['contact_ipsi']:
+            	self.Phase[s_leg] = phi_Con
+
+            CPG = np.zeros(5)
+            CPG[0] = 1 if Phase[s_leg]>phi[0] and Phase[s_leg]<(phi[0] + dphi [0]) else 0
+            CPG[1] = 1 if Phase[s_leg]>phi[1] and Phase[s_leg]<(phi[1] + dphi [1]) else 0
+            CPG[2] = 1 if Phase[s_leg]>phi[2] and Phase[s_leg]<(phi[2] + dphi [2]) else 0
+            CPG[3] = 1 if Phase[s_leg]>phi[3] and Phase[s_leg]<(phi[3] + dphi [3]) else 0
+            CPG[4] = 1 if Phase[s_leg]>phi[4] and Phase[s_leg]<(phi[4] + dphi [4])else 0
+
+            for m in muscle:
+                self.stim0_ph[s_leg][m]=np.dot(w[m],CPG)
+        #
 # -----------------------------------------------------------------------------------------------------------------
+    # _spinal_control uses sensory data(without delay?!?!) to update the phase(module) and based on that the stim
     def _spinal_control(self, sensor_data):
         for s_leg in ['r_leg', 'l_leg']:
             self._update_spinal_control_phase(s_leg, sensor_data)
             self.stim[s_leg] = self.spinal_control_leg(s_leg, sensor_data)
 
 # -----------------------------------------------------------------------------------------------------------------
+    # _update_spinal_control_phase useing the brain-command and sensory data to update the phase(module)     
     def _update_spinal_control_phase(self, s_leg, sensor_data):
         s_l = sensor_data[s_leg]
 
@@ -400,6 +483,7 @@ class LocoCtrl(object):
         self.in_contact[s_leg] = s_l['contact_ipsi']
 
 # -----------------------------------------------------------------------------------------------------------------
+    # spinal_control_leg uses sensory data(without delay?!?!) to update the stim
     def spinal_control_leg(self, s_leg, sensor_data):
         s_l = sensor_data[s_leg]
         s_b = sensor_data['body']
@@ -434,6 +518,12 @@ class LocoCtrl(object):
         stim = {}
         pre_stim = 0.01
 
+        #Shakiba
+        stim0_ph= self.stim0_ph[s_leg]
+        wFF = 1   # feedforward weight
+        wFB = 0.9   # feedback weight (set the FB weights to some value other than 1, so that the optimization does not choose 0 for values w)
+        #
+        
         if self.control_dimension == 3:
             theta_tgt_f = self.brain_command[s_leg]['theta_tgt_f']
             alpha_tgt_f = self.brain_command[s_leg]['alpha_tgt_f']
@@ -445,8 +535,9 @@ class LocoCtrl(object):
             S_HAB_6 = (ph_st_sw0*s_l['load_contra'] + ph_sw)*np.maximum(
                 cp['HAB_6_PG']*(s_l['alpha_f'] - alpha_tgt_f)
                 , 0)
-            stim['HAB'] = S_HAB_3 + S_HAB_6
-
+            #stim['HAB'] = S_HAB_3 + S_HAB_6
+            stim['HAB'] = pre_stim + (S_HAB_3 + S_HAB_6)*wFB
+            
             S_HAD_3 = ph_st*s_l['load_ipsi']*np.maximum(
                 cp['HAD_3_PG']*(theta_f-theta_tgt_f)
                 + cp['HAD_3_DG']*dtheta_f
@@ -454,7 +545,8 @@ class LocoCtrl(object):
             S_HAD_6 = (ph_st_sw0*s_l['load_contra'] + ph_sw)*np.maximum(
                 - cp['HAD_6_PG']*(s_l['alpha_f'] - alpha_tgt_f)
                 , 0)
-            stim['HAD'] = S_HAD_3 + S_HAD_6
+            #stim['HAD'] = S_HAD_3 + S_HAD_6
+            stim['HAD'] = pre_stim + (S_HAD_3 + S_HAD_6)*wFB
 
         S_HFL_3 = ph_st*s_l['load_ipsi']*np.maximum(
             - cp['HFL_3_PG']*(theta-theta_tgt)
@@ -467,8 +559,9 @@ class LocoCtrl(object):
         S_HFL_10 = ph_sw_hold_l*np.maximum(
             cp['HFL_10_PG']*(s_l['phi_hip'] - hip_tgt)
             , 0)
-        stim['HFL'] = pre_stim + S_HFL_3 + S_HFL_6 + S_HFL_10
-
+        #stim['HFL'] = pre_stim + S_HFL_3 + S_HFL_6 + S_HFL_10
+        stim['HFL'] = stim0_ph['HFL']*wFF + pre_stim + (S_HFL_3 + S_HFL_6 + S_HFL_10)*wFB
+        
         S_GLU_3 = ph_st*s_l['load_ipsi']*np.maximum(
             cp['GLU_3_PG']*(theta-theta_tgt)
             + cp['GLU_3_DG']*dtheta
@@ -480,13 +573,15 @@ class LocoCtrl(object):
         S_GLU_10 = ph_sw_hold_l*np.maximum(
             - cp['GLU_10_PG']*(s_l['phi_hip'] - hip_tgt)
             , 0)
-        stim['GLU'] = pre_stim + S_GLU_3 + S_GLU_6 + S_GLU_10
-
+        #stim['GLU'] = pre_stim + S_GLU_3 + S_GLU_6 + S_GLU_10
+        stim['GLU'] = stim0_ph['GLU']*wFF + pre_stim + (S_GLU_3 + S_GLU_6 + S_GLU_10)*wFB
+        
         S_HAM_3 = cp['HAM_3_GLU']*S_GLU_3
         S_HAM_9 = ph_sw_stop_l*np.maximum(
             - cp['HAM_9_PG']*(s_l['alpha'] - (alpha_tgt + alpha_delta))
             , 0)
-        stim['HAM'] = pre_stim + S_HAM_3 + S_HAM_9
+        #stim['HAM'] = pre_stim + S_HAM_3 + S_HAM_9
+        stim['HAM'] = stim0_ph['HAM']*wFF + pre_stim + (S_HAM_3 + S_HAM_9)*wFB
 
         S_RF_1 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['RF_1_FG']*s_l['F_RF']
@@ -494,7 +589,8 @@ class LocoCtrl(object):
         S_RF_8 = ph_sw_hold_k*np.maximum(
             - cp['RF_8_DG_knee']*s_l['dphi_knee']
             , 0)
-        stim['RF'] = pre_stim + S_RF_1 + S_RF_8
+        #stim['RF'] = pre_stim + S_RF_1 + S_RF_8
+        stim['RF'] = stim0_ph['RF']*wFF + pre_stim + (S_RF_1 + S_RF_8)*wFB
 
         S_VAS_1 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['VAS_1_FG']*s_l['F_VAS']
@@ -505,7 +601,8 @@ class LocoCtrl(object):
         S_VAS_10 = ph_sw_hold_l*np.maximum(
             - cp['VAS_10_PG']*(s_l['phi_knee'] - knee_tgt)
             , 0)
-        stim['VAS'] = pre_stim + S_VAS_1 + S_VAS_2 + S_VAS_10
+        #stim['VAS'] = pre_stim + S_VAS_1 + S_VAS_2 + S_VAS_10
+        stim['VAS'] = stim0_ph['VAS']*wFF + pre_stim + (S_VAS_1 + S_VAS_2 + S_VAS_10)*wFB
 
         S_BFSH_2 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['BFSH_2_PG']*(s_l['phi_knee'] - knee_off_st)
@@ -524,16 +621,20 @@ class LocoCtrl(object):
         S_BFSH_10 = ph_sw_hold_l*np.maximum(
             cp['BFSH_10_PG']*(s_l['phi_knee'] - knee_tgt)
             , 0)
-        stim['BFSH'] = pre_stim + S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10
+        #stim['BFSH'] = pre_stim + S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10
+        stim['BFSH'] = stim0_ph['BFSH']*wFF + pre_stim + (S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10)*wFB
 
         S_GAS_2 = ph_st*np.maximum(
             cp['GAS_2_FG']*s_l['F_GAS']
             , 0)
-        stim['GAS'] = pre_stim + S_GAS_2
+        #stim['GAS'] = pre_stim + S_GAS_2
+        stim['GAS'] = stim0_ph['GAS']*wFF + pre_stim + (S_GAS_2)*wFB
+        
         S_SOL_1 = ph_st*np.maximum(
             cp['SOL_1_FG']*s_l['F_SOL']
             , 0)
-        stim['SOL'] = pre_stim + S_SOL_1
+        #stim['SOL'] = pre_stim + S_SOL_1
+        stim['SOL'] = stim0_ph['SOL']*wFF + pre_stim + (S_SOL_1)*wFB
 
         S_TA_5 = np.maximum(
             cp['TA_5_PG']*(s_l['phi_ankle'] - ankle_tgt)
@@ -541,7 +642,8 @@ class LocoCtrl(object):
         S_TA_5_st = -ph_st*np.maximum(
             cp['TA_5_G_SOL']*S_SOL_1
             , 0)
-        stim['TA'] = pre_stim + S_TA_5 + S_TA_5_st
+        #stim['TA'] = pre_stim + S_TA_5 + S_TA_5_st
+        stim['TA'] = stim0_ph['TA']*wFF + pre_stim + (S_TA_5 + S_TA_5_st)*wFB
 
         for muscle in stim:
             stim[muscle] = np.clip(stim[muscle], 0.01, 1.0)
