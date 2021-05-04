@@ -1,18 +1,3 @@
-"""
-adapted from:
-- Song and Geyer. "A neural circuitry that emphasizes
-spinal feedback generates diverse behaviours of human locomotion." The
-Journal of physiology, 2015.
-- The control doesn't use muscle states if not needed
-  - still uses muscle force data for postivie force feedback
-- Removed some control pathways
-  - M1: from GLU and HAB
-  - M2: from HAM
-  - M4
-- Added some control pathways
-  - M1: RF
-"""
-
 # - [x y z] -> [anterior lateral superior]
 #         (<-> [posterior medial inferior])
 
@@ -127,7 +112,7 @@ class LocoCtrl(object):
     
     #------------------------------------------------------------------------------------------------
     # to make an object
-    def __init__(self, TIMESTEP, control_mode=1, control_dimension=3, params=np.ones(len(cp_keys)), W_CGP= 0):
+    def __init__(self, TIMESTEP, control_mode=1, control_dimension=3, params=np.ones(len(cp_keys)), W_CPG= 0, phi_CPG= 0):
         if self.DEBUG:
             print("===========================================")
             print("locomotion controller created in DEBUG mode")
@@ -139,7 +124,8 @@ class LocoCtrl(object):
         self.control_dimension = control_dimension # 2D or 3D
         
         #Shakiba
-        self.W_CGP= W_CGP
+        self.W_CPG = W_CPG
+        self.phi_CPG = phi_CPG    # d_phi on/off for each rectangular wave
         #
         if self.control_mode == 0:
             self.brain_control_on = 0
@@ -155,6 +141,12 @@ class LocoCtrl(object):
         self.stim0_ph = {}
         self.Phase = {}
         self.TIMESTEP = TIMESTEP
+        
+        self.omega = (1/1.05)*(2*np.pi)              # Song model walking period is 1.05, we originally used 1, but changed it later(11/11/2020)
+                
+        self.cutan = {}
+        self.cutan['t_Con'] = {}
+        self.cutan['t_Off'] = {}
         #
 
         self.n_par = len(LocoCtrl.cp_keys)
@@ -211,7 +203,7 @@ class LocoCtrl(object):
         else:
             raise Exception('error in the number of params!!')
     # -----------------------------------------------------------------------------------------------------------------
-    # specifies the control parameters
+    # specifies the control parameters (we probably want to add to this list, I don't know how yet)
     def set_control_params_RL(self, s_leg, params):
         cp = {}
         cp_map = self.cp_map
@@ -282,12 +274,12 @@ class LocoCtrl(object):
         self.cp[s_leg] = cp
 
 # -----------------------------------------------------------------------------------------------------------------
-    def update(self, sensor_data, Phase):
+    def update(self, sensor_data, t_c, Phase, cutan):
         self.sensor_data = sensor_data
         
         if self.brain_control_on:
             # update self.brain_command
-            self._brain_control(sensor_data, Phase)   # Shakiba: added Phase as an input for brain_control
+            self._brain_control(sensor_data, t_c, Phase, cutan)   # Shakiba: added Phase as an input for brain_control
         
         # updates self.stim
         self._spinal_control(sensor_data)
@@ -307,14 +299,21 @@ class LocoCtrl(object):
         
         # Shakiba
         Phase = self.Phase
+        cutan = self.cutan
         #
         
-        return stim, Phase    # Shakiba: added Phase as both the input and output of update
+        return stim, Phase, cutan    # Shakiba: added Phase as both the input and output of update
 
 # -----------------------------------------------------------------------------------------------------------------
     # brain_control uses sensory data(without delay) to specify the brain_commands
     
-    def _brain_control(self, sensor_data=0, Phase = 0):
+    # (Song & Geyer 2015)
+    # The supraspinal layer adjusts the desired foot placements (alpha_tgt) and the desired minimum swing
+    # leg length (lclr), and selects which leg should transition into swing control during double support.
+    # B, desired foot placement is calculated as target leg angles αtgt s and αtgt f for sagittal (s) and frontal (f)
+    # plane motions based on the velocity vs,f of the COM and its distance to the stance leg ankle, ds,f.
+    
+    def _brain_control(self, sensor_data=0, t_c = 0, Phase = 0, cutan = 0):
         s_b = sensor_data['body']
         cp = self.cp
         
@@ -324,34 +323,35 @@ class LocoCtrl(object):
         #Shakiba
         self.Phase['r_leg'] = Phase['r_leg']
         self.Phase['l_leg'] = Phase['l_leg']
-
+        
+        self.cutan['t_Con']['r_leg']= cutan['t_Con']['r_leg']
+        self.cutan['t_Off']['l_leg']= cutan['t_Off']['l_leg']
+        self.cutan['t_Con']['l_leg']= cutan['t_Con']['l_leg']
+        self.cutan['t_Off']['r_leg']= cutan['t_Off']['r_leg']
+        
         self.stim0_ph['r_leg'] = {}
         self.stim0_ph['l_leg'] = {}
-        
-        omega = 1*(2*np.pi);              # the walking frequency is roughly 1
-        
+                
         muscle = ['HFL', 'GLU', 'HAM', 'RF', 'VAS', 'BFSH', 'GAS', 'SOL', 'TA']
-        	
-        	# Aoi [2010] Phase resetting parameters
-        phi_Off = 3.55;
-        phi_Con = 0.31;
-
-            # Aoi [2010] CPG parameters
-        phi  = np.array([0.9708-1, 0.2308, 0.4027, 0.5539, 0.8515])*omega
-        dphi = np.array([0.1114, 0.1432, 0.1432, 0.1703, 0.1528])*omega
-            
-        w = {}
-        #w['HFL'] = np.array([0.00, 0.00, 1.04, 0.00, 0.00])
-        #w['GLU'] = np.array([0.00, 0.00, 0.00, 0.00, 0.61])
-        #w['HAM'] = np.array([0.00, 0.00, 0.00, 0.00, 0.20])
-        #w['RF']  = np.array([0.00, 0.00, 0.20, 0.00, 0.00])
-        #w['VAS'] = np.array([0.42, 0.00, 0.00, 0.17, 0.00])
-        #w['BFSH']= np.array([0.00, 0.00, 1.09, 0.00, 0.20])
-        #w['GAS'] = np.array([0.00, 0.87, 0.00, 0.00, 0.00])
-        #w['SOL'] = np.array([0.00, 1.26, 0.00, 0.00, 0.00])
-        #w['TA']  = np.array([0.56, 0.00, 0.00, 0.21, 0.00])
         
-        w = self.W_CGP
+        phi_CPG = self.phi_CPG
+        #(I was multiplying phi by omega, which made sanse for the implementation before dirac, but not after, this was corrected at 6/4/2021 after W22)
+        #(unfortunately, even though it does not make sense, I had to revert it back, for the model converge to a reasonable solution)
+        '''
+        phi  = np.array([phi_CPG[0], np.sum(phi_CPG[0:3]), np.sum(phi_CPG[0:5]), np.sum(phi_CPG[0:7]), np.sum(phi_CPG[0:9])])*self.omega
+        dphi = np.array([phi_CPG[1], phi_CPG[3], phi_CPG[5], phi_CPG[7], phi_CPG[9]])*self.omega
+
+        self.phi_Con = 0.0493*self.omega
+        self.phi_Off = 0.5650*self.omega
+        '''
+        phi  = np.array([phi_CPG[0], np.sum(phi_CPG[0:3]), np.sum(phi_CPG[0:5]), np.sum(phi_CPG[0:7]), np.sum(phi_CPG[0:9])])*(2*np.pi) 
+        dphi = np.array([phi_CPG[1], phi_CPG[3], phi_CPG[5], phi_CPG[7], phi_CPG[9]])*(2*np.pi) 
+
+        self.phi_Con = 0.0493*(2*np.pi) 
+        self.phi_Off = 0.5650*(2*np.pi) 
+        #'''
+        w = {}
+        w = self.W_CPG
         #
         
         for s_leg in ['r_leg', 'l_leg']:
@@ -388,30 +388,53 @@ class LocoCtrl(object):
         
         #Shakiba
         for s_leg in ['r_leg', 'l_leg']:
-            ph0i = Phase['r_leg']  if s_leg is 'r_leg' else Phase['l_leg']    # ipsilateral leg initial phase
-            ph0c = Phase['l_leg']  if s_leg is 'r_leg' else Phase['r_leg']    # contralateral leg initial phase
+            self.templeg = s_leg
+            self.ph0i = Phase['r_leg']  if s_leg is 'r_leg' else Phase['l_leg']    # ipsilateral leg initial phase
+            self.ph0c = Phase['l_leg']  if s_leg is 'r_leg' else Phase['r_leg']    # contralateral leg initial phase
             
-                # Aoi [2010] Oscillator
-            dPhase = (omega-1.7*np.sin(ph0i-ph0c-np.pi))    
+            '''
+            dPhase = (self.omega-1.7*np.sin(self.ph0i-self.ph0c-np.pi))    
            
-            self.Phase[s_leg] = (dPhase*self.TIMESTEP + ph0i)%(2*np.pi)
+            self.Phase[s_leg] = (dPhase*self.TIMESTEP + self.ph0i)%(2*np.pi)
             
-                # Aoi [2010] Phase Resetting
-            if self.brain_command[s_leg]['swing_init']:
-                self.Phase[s_leg] = phi_Off
+            #if self.brain_command[s_leg]['swing_init']: # ( I was resetting the phase several times during swing, This was corrected after W21, the correct phase-resetting works on some models like W19, but not all like w16)
+                #self.Phase[s_leg] = self.phi_Off #+ dPhase*self.TIMESTEP
+            if self.in_contact[s_leg] and not sensor_data[s_leg]['contact_ipsi']:
+                self.Phase[s_leg] = self.phi_Off + dPhase*self.TIMESTEP
                 
             if not self.in_contact[s_leg] and sensor_data[s_leg]['contact_ipsi']:
-            	self.Phase[s_leg] = phi_Con
+            	self.Phase[s_leg] = self.phi_Con #+ dPhase*self.TIMESTEP
+            	
+            '''
+                # Aoi [2010] Oscillator and Resetting (implemented the delta function on 23/10/2021 after W20)
+            if self.in_contact[s_leg] and not sensor_data[s_leg]['contact_ipsi']:
+                self.cutan['t_Off'][s_leg] = t_c
+                #print('swing {}'.format(s_leg), 'time:',  t_c, 'phase:', self.ph0i/np.pi)
+                #print('swing {}:'.format(s_leg), self.ph0i-self.phi_Off)
+                
+            if not self.in_contact[s_leg] and sensor_data[s_leg]['contact_ipsi']:
+            	self.cutan['t_Con'][s_leg] = t_c
+            	#print('contact {}'.format(s_leg), 'time:', t_c, 'phase:', self.ph0i/np.pi)
+            	#print('contact {}:'.format(s_leg), self.ph0i-self.phi_Con)
+
+            self.Phase[s_leg],t_next = self.Runge_Kutta4(self.ph0i, t_c, self.TIMESTEP)
+            #'''
 
             CPG = np.zeros(5)
-            CPG[0] = 1 if Phase[s_leg]>phi[0] and Phase[s_leg]<(phi[0] + dphi [0]) else 0
-            CPG[1] = 1 if Phase[s_leg]>phi[1] and Phase[s_leg]<(phi[1] + dphi [1]) else 0
-            CPG[2] = 1 if Phase[s_leg]>phi[2] and Phase[s_leg]<(phi[2] + dphi [2]) else 0
-            CPG[3] = 1 if Phase[s_leg]>phi[3] and Phase[s_leg]<(phi[3] + dphi [3]) else 0
-            CPG[4] = 1 if Phase[s_leg]>phi[4] and Phase[s_leg]<(phi[4] + dphi [4])else 0
-
+            
+            s_p = 10    #smoothing parameter
+            
+            CPG[0] = 0.5*(np.tanh(s_p*(Phase[s_leg]-phi[0])))+0.5 if Phase[s_leg]< phi[0] + dphi[0]/2 else (0.5-0.5*(np.tanh(s_p*(Phase[s_leg]-phi[0]-dphi[0]))))
+            CPG[1] = 0.5*(np.tanh(s_p*(Phase[s_leg]-phi[1])))+0.5 if Phase[s_leg]< phi[1] + dphi[1]/2 else (0.5-0.5*(np.tanh(s_p*(Phase[s_leg]-phi[1]-dphi[1]))))
+            CPG[2] = 0.5*(np.tanh(s_p*(Phase[s_leg]-phi[2])))+0.5 if Phase[s_leg]< phi[2] + dphi[2]/2 else (0.5-0.5*(np.tanh(s_p*(Phase[s_leg]-phi[2]-dphi[2]))))
+            CPG[3] = 0.5*(np.tanh(s_p*(Phase[s_leg]-phi[3])))+0.5 if Phase[s_leg]< phi[3] + dphi[3]/2 else (0.5-0.5*(np.tanh(s_p*(Phase[s_leg]-phi[3]-dphi[3]))))
+            CPG[4] = 0.5*(np.tanh(s_p*(Phase[s_leg]-phi[4])))+0.5 if Phase[s_leg]< phi[4] + dphi[4]/2 else (0.5-0.5*(np.tanh(s_p*(Phase[s_leg]-phi[4]-dphi[4]))))
+            
+            
             for m in muscle:
                 self.stim0_ph[s_leg][m]=np.dot(w[m],CPG)
+
+        #print('t_Con_r_leg:', self.cutan['t_Con']['r_leg'])
         #
 # -----------------------------------------------------------------------------------------------------------------
     # _spinal_control uses sensory data(without delay?!?!) to update the phase(module) and based on that the stim
@@ -520,8 +543,11 @@ class LocoCtrl(object):
 
         #Shakiba
         stim0_ph= self.stim0_ph[s_leg]
-        wFF = 1   # feedforward weight
-        wFB = 0.9   # feedback weight (set the FB weights to some value other than 1, so that the optimization does not choose 0 for values w)
+        wFF = 0   # feedforward weight
+        wFB = 1   # feedback weight (set the FB weights to some value other than 1, so that the optimization does not choose 0 for values w)
+        
+        stim0_ph.update((key, pre_stim + np.array(value)*wFF) for key, value in stim0_ph.items())
+
         #
         
         if self.control_dimension == 3:
@@ -536,7 +562,7 @@ class LocoCtrl(object):
                 cp['HAB_6_PG']*(s_l['alpha_f'] - alpha_tgt_f)
                 , 0)
             #stim['HAB'] = S_HAB_3 + S_HAB_6
-            stim['HAB'] = pre_stim + (S_HAB_3 + S_HAB_6)*wFB
+            stim['HAB'] = pre_stim + (S_HAB_3 + S_HAB_6)
             
             S_HAD_3 = ph_st*s_l['load_ipsi']*np.maximum(
                 cp['HAD_3_PG']*(theta_f-theta_tgt_f)
@@ -546,7 +572,7 @@ class LocoCtrl(object):
                 - cp['HAD_6_PG']*(s_l['alpha_f'] - alpha_tgt_f)
                 , 0)
             #stim['HAD'] = S_HAD_3 + S_HAD_6
-            stim['HAD'] = pre_stim + (S_HAD_3 + S_HAD_6)*wFB
+            stim['HAD'] = pre_stim + (S_HAD_3 + S_HAD_6)
 
         S_HFL_3 = ph_st*s_l['load_ipsi']*np.maximum(
             - cp['HFL_3_PG']*(theta-theta_tgt)
@@ -560,8 +586,9 @@ class LocoCtrl(object):
             cp['HFL_10_PG']*(s_l['phi_hip'] - hip_tgt)
             , 0)
         #stim['HFL'] = pre_stim + S_HFL_3 + S_HFL_6 + S_HFL_10
-        stim['HFL'] = stim0_ph['HFL']*wFF + pre_stim + (S_HFL_3 + S_HFL_6 + S_HFL_10)*wFB
-        
+        #stim['HFL'] = stim0_ph['HFL']+ (S_HFL_3 + S_HFL_6 + S_HFL_10)*wFB
+        stim['HFL'] = stim0_ph['HFL']+ ((S_HFL_3/wFB) + S_HFL_6 + S_HFL_10)*wFB
+
         S_GLU_3 = ph_st*s_l['load_ipsi']*np.maximum(
             cp['GLU_3_PG']*(theta-theta_tgt)
             + cp['GLU_3_DG']*dtheta
@@ -574,14 +601,15 @@ class LocoCtrl(object):
             - cp['GLU_10_PG']*(s_l['phi_hip'] - hip_tgt)
             , 0)
         #stim['GLU'] = pre_stim + S_GLU_3 + S_GLU_6 + S_GLU_10
-        stim['GLU'] = stim0_ph['GLU']*wFF + pre_stim + (S_GLU_3 + S_GLU_6 + S_GLU_10)*wFB
-        
+        #stim['GLU'] = stim0_ph['GLU'] + (S_GLU_3 + S_GLU_6 + S_GLU_10)*wFB
+        stim['GLU'] = stim0_ph['GLU']+ ((S_GLU_3/wFB) + S_GLU_6 + S_GLU_10)*wFB
+
         S_HAM_3 = cp['HAM_3_GLU']*S_GLU_3
         S_HAM_9 = ph_sw_stop_l*np.maximum(
             - cp['HAM_9_PG']*(s_l['alpha'] - (alpha_tgt + alpha_delta))
             , 0)
         #stim['HAM'] = pre_stim + S_HAM_3 + S_HAM_9
-        stim['HAM'] = stim0_ph['HAM']*wFF + pre_stim + (S_HAM_3 + S_HAM_9)*wFB
+        stim['HAM'] = stim0_ph['HAM']+ (S_HAM_3 + S_HAM_9)*wFB
 
         S_RF_1 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['RF_1_FG']*s_l['F_RF']
@@ -590,7 +618,7 @@ class LocoCtrl(object):
             - cp['RF_8_DG_knee']*s_l['dphi_knee']
             , 0)
         #stim['RF'] = pre_stim + S_RF_1 + S_RF_8
-        stim['RF'] = stim0_ph['RF']*wFF + pre_stim + (S_RF_1 + S_RF_8)*wFB
+        stim['RF'] = stim0_ph['RF'] + (S_RF_1 + S_RF_8)*wFB
 
         S_VAS_1 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['VAS_1_FG']*s_l['F_VAS']
@@ -602,7 +630,7 @@ class LocoCtrl(object):
             - cp['VAS_10_PG']*(s_l['phi_knee'] - knee_tgt)
             , 0)
         #stim['VAS'] = pre_stim + S_VAS_1 + S_VAS_2 + S_VAS_10
-        stim['VAS'] = stim0_ph['VAS']*wFF + pre_stim + (S_VAS_1 + S_VAS_2 + S_VAS_10)*wFB
+        stim['VAS'] = stim0_ph['VAS']+ (S_VAS_1 + S_VAS_2 + S_VAS_10)*wFB
 
         S_BFSH_2 = (ph_st_st + ph_st_sw0*(1-s_l['load_contra']))*np.maximum(
             cp['BFSH_2_PG']*(s_l['phi_knee'] - knee_off_st)
@@ -622,19 +650,19 @@ class LocoCtrl(object):
             cp['BFSH_10_PG']*(s_l['phi_knee'] - knee_tgt)
             , 0)
         #stim['BFSH'] = pre_stim + S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10
-        stim['BFSH'] = stim0_ph['BFSH']*wFF + pre_stim + (S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10)*wFB
+        stim['BFSH'] = stim0_ph['BFSH'] + (S_BFSH_2 + S_BFSH_7 + S_BFSH_8 + S_BFSH_9 + S_BFSH_10)*wFB
 
         S_GAS_2 = ph_st*np.maximum(
             cp['GAS_2_FG']*s_l['F_GAS']
             , 0)
         #stim['GAS'] = pre_stim + S_GAS_2
-        stim['GAS'] = stim0_ph['GAS']*wFF + pre_stim + (S_GAS_2)*wFB
+        stim['GAS'] = stim0_ph['GAS'] + (S_GAS_2)*wFB
         
         S_SOL_1 = ph_st*np.maximum(
             cp['SOL_1_FG']*s_l['F_SOL']
             , 0)
         #stim['SOL'] = pre_stim + S_SOL_1
-        stim['SOL'] = stim0_ph['SOL']*wFF + pre_stim + (S_SOL_1)*wFB
+        stim['SOL'] = stim0_ph['SOL'] + (S_SOL_1)*wFB
 
         S_TA_5 = np.maximum(
             cp['TA_5_PG']*(s_l['phi_ankle'] - ankle_tgt)
@@ -643,9 +671,31 @@ class LocoCtrl(object):
             cp['TA_5_G_SOL']*S_SOL_1
             , 0)
         #stim['TA'] = pre_stim + S_TA_5 + S_TA_5_st
-        stim['TA'] = stim0_ph['TA']*wFF + pre_stim + (S_TA_5 + S_TA_5_st)*wFB
+        stim['TA'] = stim0_ph['TA'] + (S_TA_5 + S_TA_5_st)*wFB
 
         for muscle in stim:
             stim[muscle] = np.clip(stim[muscle], 0.01, 1.0)
 
         return stim
+# -----------------------------------------------------------------------------------------------------------------
+    def delta(self, t_c):
+        a = 1e-2
+        y = (np.exp(-np.power(t_c/a, 2)))
+        return y
+# -----------------------------------------------------------------------------------------------------------------
+    def dPhasedt(self, z,t):
+    	s_leg = self.templeg
+    	dz = (self.omega-1.7*np.sin(z-self.ph0c-np.pi)) - (z-self.phi_Off)* self.delta(t-self.cutan['t_Off'][s_leg]-0.05) - (z-self.phi_Con)* self.delta(t-self.cutan['t_Con'][s_leg]-0.05)
+    	return dz
+        
+# -----------------------------------------------------------------------------------------------------------------
+    def  Runge_Kutta4(self, z0, t0, dt):
+        k1 = self.dPhasedt(z0, t0)*dt
+        k2 = self.dPhasedt(z0 + 0.5*k1, t0 + 0.5*dt)*dt
+        k3 = self.dPhasedt(z0 + 0.5*k2, t0 + 0.5*dt)*dt
+        k4 = self.dPhasedt(z0 + k3, t0 + dt)*dt
+
+        z = (z0 + (k1 + 2*k2 + 2*k3 + k4)/6)%(2*np.pi)
+        t = t0 + dt
+
+        return z, t
